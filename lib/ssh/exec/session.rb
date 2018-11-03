@@ -2,27 +2,31 @@ require 'net/ssh'
 
 module SSH::Exec
   class Session
-    attr_accessor :host
-    attr_accessor :id
     attr_accessor :shell
     attr_accessor :result
     attr_accessor :streams
     attr_accessor :session
 
-    def initialize(host, id, **opt)
-      @host = host
-      @id = id
-      @option = opt
+    def initialize(host, id, **opt, &block)
+      @token = "XXXDONEXXX"
+      @pattan = /^XXXDONEXXX (\d+)$/
       @result = Array.new
-      @session = Net::SSH.start(@host, @id, @option)
+      @session = Net::SSH.start(host, id, opt)
+    end
+
+    def start!(**opt, &block)
+      @shell = opt[:shell] || "bash -l"
+      @block = block
+      open
+
+      return result
     end
 
     def stdin(cmd, **opt)
-      @shell = (opt[:shell] || nil)
       @streams = {:stdin => cmd}
-      open
+      @channel.send_data("#{streams[:stdin]}\necho '#{@token}'")
+      Fiber.yield
 
-      result << streams
       return streams
     end
 
@@ -33,18 +37,30 @@ module SSH::Exec
 
     def open_succeeded(channel)
       channel.exec(shell?, &method(:cmd_exec))
-      channel.on_close
     end
 
     def cmd_exec(channel, success)
       raise "sesstion error!!" unless success
-      unless shell.nil?
-        streams[:stdin].each{|cmd| channel.send_data "#{cmd}\n"} if streams[:stdin].is_a?(Array)
-        channel.send_data "#{streams[:stdin]}\n" if streams[:stdin].is_a?(String)
-        channel.send_data "exit\n"
+      channel.send_data "export TERM=vt100\necho '#{@token}' $?\n"
+      @channel = channel
+      f =  Fiber.new do
+        @block.call self
+        channel.send_data("exit\n")
       end
-      channel.on_data{|c,data| streams.merge!(:stdout => data)}
-      channel.on_extended_data{|c,type,data| streams.merge!(:stderr => data)}
+
+      channel.on_data do |c,data|
+        if data =~ @pattan
+          rc = $1.to_i
+          streams.merge!(:rc => rc) 
+          res = streams
+          result << streams
+          streams = Hash.new
+          f.resume res
+        else
+          streams.merge!(:stdout => data)
+        end
+        channel.on_extended_data{|c,type,data| streams.merge!(:stderr => data)}
+      end
     end
 
     def shell?
@@ -54,4 +70,3 @@ module SSH::Exec
 
   end
 end
-
